@@ -1,0 +1,159 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Android project taiyaar karo
+        run: |
+          set -euo pipefail
+          for f in index.html MainActivity.java AndroidManifest.xml; do
+            test -f "$f" || { echo "File nahi mili: $f"; exit 1; }
+          done
+
+          mkdir -p app/src/main/java/app/bollywood/studio app/src/main/assets
+          cp MainActivity.java app/src/main/java/app/bollywood/studio/MainActivity.java
+          cp AndroidManifest.xml app/src/main/AndroidManifest.xml
+          cp index.html app/src/main/assets/index.html
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "BollywoodStudio"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'app.bollywood.studio'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'app.bollywood.studio'
+                  minSdk 29
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.11.0'
+          }
+          EOF
+
+          python3 - <<'PY'
+          import os, struct, zlib
+
+          def make_png(size, path):
+              bg, gold, rose = (20, 6, 28), (246, 185, 59), (233, 80, 122)
+              c = (size - 1) / 2.0
+              raw = bytearray()
+              for y in range(size):
+                  raw.append(0)
+                  for x in range(size):
+                      d = (((x - c) ** 2 + (y - c) ** 2) ** 0.5) / (size / 2.0)
+                      if d < 0.30:
+                          col = rose
+                      elif d < 0.52:
+                          col = bg
+                      elif d < 0.66:
+                          col = gold
+                      else:
+                          col = bg
+                      raw += bytes(col) + b'\xff'
+              def chunk(t, data):
+                  body = t + data
+                  return struct.pack('>I', len(data)) + body + struct.pack('>I', zlib.crc32(body) & 0xffffffff)
+              png = (b'\x89PNG\r\n\x1a\n'
+                     + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0))
+                     + chunk(b'IDAT', zlib.compress(bytes(raw), 9))
+                     + chunk(b'IEND', b''))
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              with open(path, 'wb') as f:
+                  f.write(png)
+
+          for name, size in [('mdpi', 48), ('hdpi', 72), ('xhdpi', 96), ('xxhdpi', 144), ('xxxhdpi', 192)]:
+              make_png(size, 'app/src/main/res/mipmap-%s/ic_launcher.png' % name)
+          PY
+
+          find app -type f | sort
+
+      - name: APK build karo
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: APK ko artifact banao
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bollywood-Studio-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: APK ko Releases mein daalo
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk Bollywood-Studio.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest Bollywood-Studio.apk \
+            --title "Bollywood Studio APK" \
+            --notes "Debug APK. Install karne se pehle phone mein Unknown apps allow karo." \
+            --target "${{ github.sha }}"
